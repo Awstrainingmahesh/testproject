@@ -41,7 +41,7 @@ def main():
             # Download audio from YouTube video
             audio_file = download_audio(video_url)
 
-            # Convert speech to text
+            # Convert speech to text and
             video_text = speech_to_text(audio_file)
 
             # Summarize the transcript
