@@ -1,62 +1,102 @@
 import streamlit as st
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-from pytube import YouTube
-import speech_recognition as sr
+import yt_dlp
+import whisper
 from transformers import pipeline
-from textblob import TextBlob
+import os
 import re
+from pydub import AudioSegment
 
-# Function to download audio from YouTube
-def download_audio(url):
-    yt = YouTube(url)
-    audio_stream = yt.streams.filter(only_audio=True).first()
-    return audio_stream.download()
+# Function to extract video ID from URL
+def get_video_id(url):
+    match = re.search(r"v=([A-Za-z0-9_-]{11})", url)
+    return match.group(1) if match else None
 
-# Function to convert speech to text
-def speech_to_text(audio_file):
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(audio_file) as source:
-        audio = recognizer.record(source)
-    text = recognizer.recognize_google(audio)
-    return text
+# Function to download YouTube audio
+def download_audio(video_url):
+    ydl_opts = {
+        "format": "m4a/bestaudio",
+        "outtmpl": "audio.m4a",
+        "nocheckcertificate": True,
+        "quiet": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.youtube.com/",
+        },
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            ydl.download([video_url])
+            audio_path = "audio.m4a"
+
+            if not os.path.exists(audio_path):
+                return None
+
+            sound = AudioSegment.from_file(audio_path, format="m4a")
+            sound.export("audio.mp3", format="mp3")
+
+            return "audio.mp3"
+        except Exception as e:
+            st.error(f"Error downloading audio: {e}")
+            return None
+
+# Function to transcribe audio using Whisper
+def transcribe_audio(audio_path):
+    model = whisper.load_model("small")
+    result = model.transcribe(audio_path)
+    return result["text"]
+
+# Function to split text into chunks
+def chunk_text(text, chunk_size=500):
+    words = text.split()
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
 # Function to summarize text
-def summarize_text(text, max_length=50000):
-    summarization_pipeline = pipeline("summarization")
-    summary = summarization_pipeline(text, max_length=max_length, min_length=50, do_sample=False)
-    return summary[0]['summary_text']
+def summarize_text(text):
+    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+    chunks = chunk_text(text, chunk_size=500)
+    summaries = []
 
-# Main Streamlit app
-def main():
-    st.title("YouTube Video Summarizer")
-
-    # User input for YouTube video URL
-    video_url = st.text_input("Enter YouTube Video URL:", "")
-
-    # User customization options
-    max_summary_length = st.slider("Max Summary Length:", 1000, 20000, 50000)
-
-    if st.button("Summarize"):
+    for chunk in chunks:
         try:
-            # Download audio from YouTube video
-            audio_file = download_audio(video_url)
+            summary = summarizer(chunk, max_length=150, min_length=50, do_sample=False)
+            summaries.append(summary[0]["summary_text"])
+        except Exception:
+            summaries.append(chunk)
 
-            # Convert speech to text and
-            video_text = speech_to_text(audio_file)
+    final_summary = " ".join(summaries)
+    if len(final_summary.split()) > 500:
+        final_summary = summarizer(final_summary, max_length=200, min_length=50, do_sample=False)[0]["summary_text"]
+    
+    return final_summary
 
-            # Summarize the transcript
-            summary = summarize_text(video_text, max_length=max_summary_length)
+# Streamlit App
+st.title("📹 YouTube Video Summarizer")
+st.write("Enter a YouTube video URL to generate a summary.")
 
-            # Display summarized text
-            st.subheader("Video Summary:")
-            st.write(summary)
+video_url = st.text_input("Enter YouTube Video URL:")
 
-        except TranscriptsDisabled:
-            st.error("Transcripts are disabled for this video.")
-        except NoTranscriptFound:
-            st.error("No transcript found for this video.")
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+if st.button("Summarize Video"):
+    if not video_url:
+        st.warning("Please enter a valid YouTube URL.")
+    else:
+        st.info("🔄 Downloading audio...")
+        audio_path = download_audio(video_url)
 
-if __name__ == "__main__":
-    main()
+        if not audio_path:
+            st.error("❌ Failed to download audio. Try another video.")
+        else:
+            st.info("📝 Transcribing audio...")
+            transcript = transcribe_audio(audio_path)
+
+            if not transcript.strip():
+                st.error("❌ Failed to transcribe audio.")
+            else:
+                st.success("✅ Transcription Complete!")
+                st.text_area("🗒 Full Transcript:", transcript, height=200)
+
+                st.info("📜 Summarizing transcript...")
+                summary = summarize_text(transcript)
+                
+                st.success("✅ Summary Generated!")
+                st.text_area("📄 Video Summary:", summary, height=150)
